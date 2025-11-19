@@ -78,7 +78,7 @@ def screen_detect(img):
     box = box.astype('float32')
     M = cv2.getPerspectiveTransform(box, pts2)
     screen = cv2.warpPerspective(img, M, (540, 960))
-    cv2.imshow('screen',screen)
+    # cv2.imshow('screen',screen)  # Disabled for speed
 
     print(lines1)
     for x1, y1, x2, y2 in lines1[:]:
@@ -97,13 +97,58 @@ def screen_detect(img):
 
 
 def pull_screenshot():
-    process = subprocess.Popen('adb shell screencap -p', shell=True, stdout=subprocess.PIPE)
-    screenshot = process.stdout.read()
-    if sys.platform == 'win32':
-        screenshot = screenshot.replace(b'\r\n', b'\n')
-    f = open('autojump.png', 'wb')
-    f.write(screenshot)
-    f.close()
+    """Capture the device screen via adb and return an OpenCV image (BGR).
+
+    Uses raw format for maximum speed (no PNG compression overhead).
+    Falls back to PNG format if raw fails.
+    """
+    try:
+        # Method 1: Raw format (fastest - no compression, ~50-70% faster than PNG)
+        try:
+            proc = subprocess.Popen(['adb', 'exec-out', 'screencap'],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            raw_data = proc.stdout.read()
+
+            if len(raw_data) > 100:
+                # Parse raw screencap header (first 12-16 bytes contain width, height, format)
+                # Format: width(4) height(4) format(4)
+                import struct
+                if len(raw_data) >= 12:
+                    w, h, fmt = struct.unpack('<III', raw_data[:12])
+                    # RGBA format (most common)
+                    if fmt == 1 and w > 0 and h > 0 and w < 10000 and h < 10000:
+                        pixel_data = raw_data[12:]  # Skip header
+                        expected_size = w * h * 4
+                        if len(pixel_data) >= expected_size:
+                            # Create numpy array from raw RGBA data
+                            img = np.frombuffer(pixel_data[:expected_size], dtype=np.uint8)
+                            img = img.reshape((h, w, 4))
+                            # Convert RGBA to BGR
+                            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                            return img
+        except Exception as e:
+            pass  # Fall back to PNG method
+
+        # Method 2: PNG format (fallback - slower but more compatible)
+        proc = subprocess.Popen(['adb', 'exec-out', 'screencap', '-p'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        screenshot = proc.stdout.read()
+
+        # Normalize CRLF for Windows
+        if sys.platform == 'win32' and isinstance(screenshot, bytes):
+            screenshot = screenshot.replace(b'\r\n', b'\n')
+
+        if len(screenshot) > 100:
+            arr = np.frombuffer(screenshot, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is not None:
+                return img
+
+        return None
+
+    except Exception as e:
+        print('pull_screenshot error:', e)
+        return None
 
 
 def self_detect(img):
@@ -117,15 +162,48 @@ def self_detect(img):
 
     color_mask = cv2.inRange(hsv_img, color_lower, color_upper)
 
-    contours= cv2.findContours(color_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)[1]
-    if len(contours)>0:
-        max_contour = max(contours, key=cv2.contourArea)
-        max_contour = cv2.convexHull(max_contour)
-        rect = cv2.boundingRect(max_contour)
-        x, y, w, h = rect
-        center_coord=(x+int(w/2),y+h+region_upper - 20)
-        cv2.circle(img, center_coord, 5, (0,255,0), -1)
-        return center_coord
+    # Robust findContours across OpenCV versions
+    cnts = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = cnts[0] if len(cnts) == 2 else cnts[1] if len(cnts) >= 2 else []
+
+    # Filter out invalid contours by safely computing area
+    valid_contours = []
+    for c in contours:
+        try:
+            if c is None:
+                continue
+            arr = np.asarray(c)
+            if arr.size == 0:
+                continue
+            # Ensure contour has shape (N,1,2) or (N,2)
+            if arr.ndim == 3 and arr.shape[1] == 1 and arr.shape[2] == 2:
+                pass
+            elif arr.ndim == 2 and arr.shape[1] == 2:
+                arr = arr.reshape((-1,1,2))
+            else:
+                continue
+            # Convert to int32 which OpenCV expects for contour functions
+            arr = arr.astype(np.int32)
+            area = cv2.contourArea(arr)
+            if area and area > 10:  # ignore tiny noise
+                valid_contours.append(arr)
+        except Exception:
+            continue
+
+    if not valid_contours:
+        return None
+
+    try:
+        max_contour = max(valid_contours, key=cv2.contourArea)
+    except Exception as e:
+        print('self_detect: failed to get max contour:', e)
+        return None
+    max_contour = cv2.convexHull(max_contour)
+    rect = cv2.boundingRect(max_contour)
+    x, y, w, h = rect
+    center_coord=(x+int(w/2),y+h+region_upper - 20)
+    cv2.circle(img, center_coord, 5, (0,255,0), -1)
+    return center_coord
 
 
 def goal_detect(img,body_position):
@@ -158,39 +236,67 @@ def goal_detect(img,body_position):
     edge_list[2]=np.bitwise_or(edge_list[2],edge_list[1])
     edge_final=np.bitwise_or(edge_list[3],edge_list[2])
 
-    cv2.imshow('edge',edge_final)
+    # cv2.imshow('edge',edge_final)  # Disabled for speed
 
-    contours= cv2.findContours(edge_final, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[1]  # cv2.CHAIN_APPROX_NONE
+    # Replace contours extraction in goal_detect as well with robust pattern
+    cnts = cv2.findContours(edge_final, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours = cnts[0] if len(cnts) == 2 else cnts[1] if len(cnts) >= 2 else []
 
-    #max_contour = max(contours, key=cv2.contourArea)
-    #max_contour = cv2.convexHull(max_contour)
+    # Filter valid contours (non-empty)
+    if not contours:
+        print('goal_detect: no contours found')
+        return None
 
     y=99999
+    raw_x = raw_y = None
+    x = None
     for contour in contours:
-        sorted_top=sorted(contour,key=lambda contour:contour[0][1])
-        if sorted_top[0][0][1]<y:
-            raw_x = x = sorted_top[0][0][0]
-            raw_y = y = sorted_top[0][0][1]
-
-    '''
-    for i in sorted_top:
         try:
-            #print(abs((i[0][0]-x)/(y-i[0][1])-pow(3,0.5)))
-            if abs((i[0][0]-x)/(i[0][1]-y)-pow(3,0.5))<0.5:
-                cv2.circle(img, (int(i[0][0] + region_left), int(i[0][1] + region_upper)), 5, (0, 0, 255), -1)
-                y=i[0][1]
-        except:
-            pass
-    '''
-    print((int(x+ region_left), int(y+ region_upper)))
+            if contour is None:
+                continue
+            arr = np.asarray(contour)
+            if arr.size == 0:
+                continue
+            # normalize shape
+            if arr.ndim == 3 and arr.shape[1] == 1 and arr.shape[2] == 2:
+                pass
+            elif arr.ndim == 2 and arr.shape[1] == 2:
+                arr = arr.reshape((-1,1,2))
+            else:
+                continue
+            arr = arr.astype(np.int32)
+            sorted_top=sorted(arr, key=lambda p: p[0][1])
+        except Exception:
+            continue
+        if len(sorted_top) == 0:
+            continue
+        if sorted_top[0][0][1]<y:
+            raw_x = x = int(sorted_top[0][0][0])
+            raw_y = y = int(sorted_top[0][0][1])
 
+    # If we never set x/raw_x then something went wrong
+    if x is None or raw_x is None:
+        print('goal_detect: failed to locate top-most point in contours')
+        return None
 
-    mask = np.zeros((region_lower-region_upper+ 2, region_right-region_left + 2), np.uint8)
-    mask=cv2.floodFill(region, mask, (raw_x, raw_y+16), [255,25,255])[2]
+    # Use safe fallbacks for debug printing
+    px = x if x is not None else 0
+    py = y if y is not None else 0
+    print((int(px + region_left), int(py + region_upper)))
+
+    try:
+        mask = np.zeros((region_lower-region_upper+ 2, region_right-region_left + 2), np.uint8)
+        mask=cv2.floodFill(region, mask, (raw_x, raw_y+16), [255,25,255])[2]
+    except Exception as e:
+        print('goal_detect: floodFill failed:', e)
+        return None
     cv2.circle(img, (int(x + region_left), int(y + region_upper)), 5, (255, 0, 5), -1)
     #cv2.imshow("region",region)
 
     M = cv2.moments(mask)
+    if M.get("m00", 0) == 0:
+        print('goal_detect: zero moment, cannot compute centroid')
+        return None
     x = int(M["m10"] / M["m00"])
     y = int(M["m01"] / M["m00"])
 
@@ -209,8 +315,9 @@ def goal_detect(img,body_position):
 
     #y = (-abs(x-body_position[0])/pow(3,0.5)+body_position[1])
     cv2.circle(img, (int(x),int(y)), 5, (0,0,255), -1)
-    cv2.imshow('dealed',img)
+    # cv2.imshow('dealed',img)  # Disabled for speed
     return [x, y]
+
 
 
 
