@@ -1,17 +1,9 @@
+//修改自 [wyf0912/JumpJump](https://github.com/wyf0912/JumpJump)
+//不知道为什么原版在我的手机上无法正常运行，于是在Github Copilot的帮助下修改了一版。需要命令行安装了cmd，然后有线连接手机运行auto_jump.py
+//不是100%准确，大约到1000分左右就有很大概率失误，如果一开始就失误可以调节auto_jump.py中press_coefficient的值（直接乘以一个系数）
+
 # 跳一跳辅助程序<bl>
 ## 环境要求<br>
 python3.5+opencv+adb工具
 ## 使用方法<br>
-运行autojump.py文件。默认分辨率是1920*1080的手机。计划之后使用摄像头加机械臂。
-## 注意事项<br>
-图像识别利用30度角和漫水填充，消除了累计误差，基本可以做到一直跳不死。<br>
-但跳的太准的bug还没有修复，不要连续跳中心太多次，成绩容易被ban。<br><br>
-自动跳一跳如下图：<br>
-![image](https://raw.githubusercontent.com/wyf0912/JumpJump/master/github_src/jump.gif)
-
-# 机械外挂部分<br>
-此部分是为了以后实现摄像头加机械臂，添加的功能。
-## 屏幕提取<br>
-此部分是为了实现从图像中找到手机屏幕，并将其利用透视变换提取出来。效果及原理如下图<br>
-![image](https://raw.githubusercontent.com/wyf0912/JumpJump/master/github_src/detect_screen.jpg)
-
+运行autojump.py文件
